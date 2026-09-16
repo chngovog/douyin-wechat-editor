@@ -1,0 +1,6 @@
+interface:
+  display_name: "抖音热点转公众号"
+  short_description: "从四账号选题、证据核验到短文双封面与移动端质检，完成本地交付"
+  default_prompt: "使用 $douyin-wechat-editor 为指定账号自主找当日抖音素材并完成公众号文章本地发布包。"
+policy:
+  allow_implicit_invocation: true

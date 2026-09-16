@@ -1,0 +1,8 @@
+{
+  "name": "douyin-wechat-editor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local WeChat editorial pipeline and headless mobile preview",
+  "dependencies": {"playwright": "1.62.1"},
+  "scripts": {"test": "python -m unittest discover -s tests -v"}
+}
