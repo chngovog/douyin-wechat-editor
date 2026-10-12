@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from integrity import inside, sha256, fingerprint, content_checks, final_checks, check_source
+from policies import WORD_POLICY, VISUAL_POLICY, FRAME_POLICY, DELIVERY_POLICY, EDITORIAL_POLICY, count_report, count_errors
 
 
 ACCOUNTS = {"digital", "basketball", "dream", "entertainment"}
@@ -49,6 +50,12 @@ def cmd_init(args: argparse.Namespace) -> None:
         (target / item).mkdir(parents=True, exist_ok=True)
     job = {
         "schema_version": 8,
+        "word_count_policy": WORD_POLICY,
+        "visual_policy": VISUAL_POLICY,
+        "delivery_policy": DELIVERY_POLICY,
+        "editorial_policy": EDITORIAL_POLICY,
+        "editorial_records": {"content_value": "analysis/content-value-review.md", "voice": "analysis/voice-review.md"},
+        "source_dedup": {"checked_at": "", "scope": "", "video_id": "", "canonical_url": "", "event_summary": "", "matched_jobs": [], "decision": "pending", "reason": ""},
         "account": args.account,
         "slug": args.slug,
         "source": {"type": "video", "path": "", "creator": "", "claim": "", "page_url": "", "published_at": "", "event_date": "", "checked_at": "", "rights_status": "research-only; permission unconfirmed"},
@@ -93,9 +100,13 @@ def cmd_init(args: argparse.Namespace) -> None:
             "publish_decision": "hold", "hold_or_merge_reason": "待补证据"
         },
         "visual_plan": {
-            "recommended_visible_units": "about-3", "planned_visible_units": 3,
-            "preferred_structure": "1 direct-video-frame + 2 video-evidence-collage",
-            "direct_frame_units": 1, "collage_units": 2,
+            "recommended_visible_units": "exactly-2", "planned_visible_units": 2,
+            "preferred_structure": "2 distinct annotated single-column collages",
+            "collage_frame_policy": FRAME_POLICY,
+            "preferred_frames_per_collage": "2-3; maximum 4",
+            "collage_export_budget": {"maximum_edge_px": 4096, "maximum_bytes": 3145728, "basis": "local-conservative-budget-not-WeChat-limit"},
+            "annotation_review": "analysis/visual-review.md",
+            "direct_frame_units": 0, "collage_units": 2,
             "detail_or_comparison_units": 0, "imagegen_highlight_units": 0,
             "real_evidence_units": 0, "unique_source_frames": 0,
             "below_recommendation_reason": "", "structure_exception_reason": ""
@@ -104,12 +115,14 @@ def cmd_init(args: argparse.Namespace) -> None:
         "digital_decision": {},
         "blocks": [], "sources": [], "evidence_items": [], "collage_manifests": [],
         "single_frame_exception": "", "output": "deliver/公众号文章_inline.html",
-        "preview": "deliver/mobile_preview.png", "evidence": {"ledger_output": "evidence_ledger.md"},
+        "preview": None, "layout_report": "analysis/mobile-layout-check.json",
+        "evidence": {"ledger_output": "evidence_ledger.md"},
         "qa": {
-            "target_cjk": 500, "minimum_cjk": 450, "maximum_cjk": 550,
-            "recommended_minimum_visible_units": 3, "recommended_maximum_visible_units": 4,
+            "target_visible_chars": 440, "minimum_visible_chars": 400, "maximum_visible_chars": 500,
+            "maximum_cjk": 500,
+            "recommended_minimum_visible_units": 2, "recommended_maximum_visible_units": 2,
             "minimum_headings": 0,
-            "require_mobile_preview": True, "require_title_strategy": True,
+            "require_mobile_preview": False, "require_mobile_layout_check": True, "require_title_strategy": True,
             "require_imagegen_cover": True, "require_cover_variants": True,
             "require_imagegen_text": True, "require_cover_source_record": True,
             "require_originality_gate": True, "minimum_verifiable_facts": 6,
@@ -129,7 +142,7 @@ def data_uri(path: Path) -> str:
     return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
 
 
-def render_block(root: Path, block: dict[str, Any]) -> str:
+def render_block(root: Path, block: dict[str, Any], embed_images=True) -> str:
     kind = block.get("type")
     text = html.escape(str(block.get("text", "")))
     if kind == "lead":
@@ -144,7 +157,7 @@ def render_block(root: Path, block: dict[str, Any]) -> str:
         return f'<div class="notice">{text}</div>'
     if kind == "figure":
         image = resolve_path(root, str(block.get("src", "")))
-        if not image.is_file():
+        if embed_images and not image.is_file():
             raise ArticleError(f"配图不存在: {image}")
         visual = html.escape(str(block.get("visual", "direct-video-frame")), quote=True)
         attrs = [f'data-visual="{visual}"']
@@ -153,12 +166,13 @@ def render_block(root: Path, block: dict[str, Any]) -> str:
             if value not in (None, ""):
                 attrs.append(f'{dest}="{html.escape(str(value), quote=True)}"')
         cap = html.escape(str(block.get("caption", "")))
-        return f'<figure {" ".join(attrs)}><img src="{data_uri(image)}" alt="{cap}"><figcaption>{cap}</figcaption></figure>'
+        image_src = data_uri(image) if embed_images else ""
+        return f'<figure {" ".join(attrs)}><img src="{image_src}" alt="{cap}"><figcaption>{cap}</figcaption></figure>'
     raise ArticleError(f"不支持的正文块: {kind}")
 
 
-def build_html(job: dict[str, Any], root: Path) -> str:
-    blocks = "\n".join(render_block(root, item) for item in job.get("blocks", []))
+def build_html(job: dict[str, Any], root: Path, embed_images=True) -> str:
+    blocks = "\n".join(render_block(root, item, embed_images) for item in job.get("blocks", []))
     source_items = []
     source_records = job.get("sources") or job.get("evidence", {}).get("external_sources", [])
     for item in source_records:
@@ -220,10 +234,53 @@ def cmd_render(args: argparse.Namespace) -> None:
     job["qa"]["review"] = {}
     write_job(path, job)
     print(f"本地待质检 HTML: {output}"); print(f"证据台账: {ledger}")
+    if job.get('word_count_policy') == WORD_POLICY:
+        report = word_report(job, root)
+        report_path = root / 'analysis/word-count.json'
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+        if count_errors(report):
+            raise ArticleError('; '.join(count_errors(report)))
+
+
+def word_report(job, root):
+    expected = build_html(job, root, embed_images=False)
+    output = resolve_path(root, job['output'])
+    report = count_report(output.read_text(encoding='utf-8-sig') if output.is_file() else expected, expected)
+    report['html_sha256'] = sha256(output) if output.is_file() else None
+    return report
+
+
+def cmd_count(args):
+    job, path = read_job(Path(args.job))
+    report = word_report(job, path.parent)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if count_errors(report):
+        raise ArticleError('; '.join(count_errors(report)))
+
+
+def cmd_check_layout(args):
+    job, path = read_job(Path(args.job)); root = path.parent
+    output = resolve_path(root, job['output'])
+    if not output.is_file() or job.get('build', {}).get('input_fingerprint') != fingerprint(job, root):
+        raise ArticleError('请先重新render，不能检查过期HTML')
+    if job['build'].get('html_sha256') != sha256(output):
+        raise ArticleError('HTML已变化，请重新render')
+    report = resolve_path(root, job.get('layout_report', 'analysis/mobile-layout-check.json'))
+    renderer = Path(__file__).with_name('render_local_html_mobile.js')
+    result = subprocess.run([os.environ.get('NODE', 'node'), str(renderer), '--layout-check', str(output), str(report)], check=False)
+    if result.returncode:
+        raise ArticleError('375px无截图排版检查失败；查看layout报告')
+    job['build']['layout_sha256'] = sha256(report)
+    job['workflow']['stage'] = 'layout-checked'
+    write_job(path, job)
+    print(f'375px无截图排版检查: {report}；仍需图片与内容目视')
 
 
 def cmd_preview(args: argparse.Namespace) -> None:
     job, path = read_job(Path(args.job)); root = path.parent
+    if job.get('delivery_policy') == DELIVERY_POLICY:
+        return cmd_check_layout(args)
     output = resolve_path(root, str(job.get("output"))); preview = resolve_path(root, str(job.get("preview")))
     if not output.is_file(): raise ArticleError("请先运行 render")
     if job.get("build", {}).get("input_fingerprint") != fingerprint(job, root):
@@ -303,15 +360,19 @@ def cmd_validate(args: argparse.Namespace) -> None:
     job, path = read_job(Path(args.job)); root=path.parent; errors=[]; warnings=[]
     errors.extend(content_checks(job, root))
     errors.extend(final_checks(job, root))
-    output=resolve_path(root,str(job.get("output"))); preview=resolve_path(root,str(job.get("preview"))); ledger=resolve_path(root,str(job.get("evidence",{}).get("ledger_output","evidence_ledger.md")))
+    output=resolve_path(root,str(job.get("output"))); ledger=resolve_path(root,str(job.get("evidence",{}).get("ledger_output","evidence_ledger.md")))
     if not output.is_file(): errors.append("缺少发布 HTML")
-    if not preview.is_file(): errors.append("缺少移动端预览")
+    if job.get('delivery_policy') != DELIVERY_POLICY and not resolve_path(root, str(job.get('preview'))).is_file():
+        errors.append('缺少移动端预览')
     if not ledger.is_file(): errors.append("缺少证据台账")
     blocks=job.get("blocks",[]); body="".join(str(x.get("text","")) for x in blocks); cjk=len(re.findall(r"[\u4e00-\u9fff]",body)); qa=job.get("qa",{})
     maximum = int(qa.get("maximum_cjk", 550))
-    if maximum > 550 and not qa.get("length_override_user_request"):
+    if job.get('word_count_policy') == WORD_POLICY:
+        report = word_report(job, root)
+        errors.extend(count_errors(report))
+    elif maximum > 550 and not qa.get("length_override_user_request"):
         errors.append("超过550字上限需要用户当前明确长文要求")
-    if cjk > maximum or (cjk < 450 and not qa.get("short_body_reason")):
+    if job.get('word_count_policy') != WORD_POLICY and (cjk > maximum or (cjk < 450 and not qa.get("short_body_reason"))):
         errors.append(f"正文中文字符超出范围且没有合理例外: {cjk}")
     figure_count=sum(1 for x in blocks if x.get("type")=="figure")
     recommended_min=int(qa.get("recommended_minimum_visible_units",3))
@@ -392,9 +453,20 @@ def cmd_validate(args: argparse.Namespace) -> None:
         for error in errors: print(f"- {error}",file=sys.stderr)
         raise SystemExit(2)
     job["workflow"]["stage"] = "validated-local"
-    job["workflow"]["next_action"] = "Deliver four links; not uploaded or published"
+    new_delivery = job.get('delivery_policy') == DELIVERY_POLICY
+    job["workflow"]["next_action"] = f"Deliver {'three' if new_delivery else 'four'} links; not uploaded or published"
     write_job(path, job)
-    print(f"[PASS] 公众号文章本地验证: {output}"); print(f"- 正文中文字符: {cjk}"); print(f"- 正文可见配图单元: {figure_count}"); print(f"- ImageGen正文亮点图: {len(highlight_blocks)}")
+    delivered = {'article': job['output'], **cover['outputs']}
+    if not new_delivery:
+        delivered['mobile_preview'] = job['preview']
+    manifest = {k: {'path': v, 'sha256': sha256(resolve_path(root, v))} for k, v in delivered.items()}
+    resolve_path(root, 'deliver/delivery-manifest.json').write_text(json.dumps({'files_required': len(delivered), 'files': manifest, 'platform_status': 'not uploaded or published'}, ensure_ascii=False, indent=2), encoding='utf-8')
+    print(f"[PASS] 公众号文章本地验证: {output}")
+    if job.get('word_count_policy') == WORD_POLICY:
+        print(f"- 完整正文可见字符: {report['body_visible_chars']}；含标题: {report['copy_all_visible_chars']}；本地估算，微信未核验")
+    else:
+        print(f'- 正文中文字符: {cjk}')
+    print(f"- 正文可见配图单元: {figure_count}")
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -410,7 +482,7 @@ def cmd_status(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser=argparse.ArgumentParser(description="微信公众号文章统一生成器"); sub=parser.add_subparsers(dest="command",required=True)
     p=sub.add_parser("init"); p.add_argument("--project-root",required=True); p.add_argument("--slug",required=True); p.add_argument("--account",required=True); p.add_argument("--title",default=""); p.add_argument("--graphic-title",default=""); p.set_defaults(func=cmd_init)
-    for name,func in (("render",cmd_render),("preview",cmd_preview),("validate",cmd_validate),("status",cmd_status)):
+    for name,func in (("render",cmd_render),("count",cmd_count),("check-layout",cmd_check_layout),("preview",cmd_preview),("validate",cmd_validate),("status",cmd_status)):
         p=sub.add_parser(name); p.add_argument("job"); p.set_defaults(func=func)
     return parser
 

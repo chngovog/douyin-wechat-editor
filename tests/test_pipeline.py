@@ -39,6 +39,13 @@ class PipelineTests(unittest.TestCase):
 
     def fill(self):
         j = self.job
+        # Explicit historical-policy fixture: existing jobs are not auto-migrated.
+        for key in ('word_count_policy', 'visual_policy', 'delivery_policy', 'editorial_policy'):
+            j.pop(key, None)
+        j['visual_plan'].pop('collage_frame_policy', None)
+        j['preview'] = 'deliver/mobile_preview.png'
+        j['qa'].update(maximum_cjk=550, require_mobile_preview=True,
+                       recommended_minimum_visible_units=3, recommended_maximum_visible_units=4)
         video = self.root / 'source/video.mp4'
         video.write_bytes(b'SYNTHETIC TEST ONLY, NOT A PLAYABLE SOURCE')
         j['source'].update(path='source/video.mp4', creator='合成测试', claim='仅用于软件测试',

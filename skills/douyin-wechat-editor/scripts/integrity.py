@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from policies import VISUAL_POLICY, FRAME_POLICY, DELIVERY_POLICY, EDITORIAL_POLICY
 
 
 def sha256(path: Path) -> str:
@@ -99,6 +100,10 @@ def fingerprint(job: dict, root: Path) -> str:
                 files.add(block['collage_manifest'])
     files.update(job.get('cover', {}).get('outputs', {}).values())
     files.update(job.get('collage_manifests', []))
+    if job.get('editorial_policy') == EDITORIAL_POLICY:
+        files.update(job.get('editorial_records', {}).values())
+    if job.get('visual_policy') == VISUAL_POLICY:
+        files.add(job.get('visual_plan', {}).get('annotation_review', 'analysis/visual-review.md'))
     hashes = {name: sha256(inside(root, name)) for name in sorted(files)}
     encoded = json.dumps({'job': stable, 'assets': hashes}, ensure_ascii=False,
                          sort_keys=True, separators=(',', ':')).encode('utf-8')
@@ -107,6 +112,17 @@ def fingerprint(job: dict, root: Path) -> str:
 
 def content_checks(job: dict, root: Path) -> list[str]:
     errors = check_source(job, root)
+    if job.get('editorial_policy') == EDITORIAL_POLICY:
+        dedup = job.get('source_dedup', {})
+        if dedup.get('decision') not in ('unused', 'explicit-revision') or not all(dedup.get(k) for k in ('checked_at', 'scope', 'event_summary', 'reason')):
+            errors.append('full-history source/event dedup audit missing or unresolved')
+        for key in ('content_value', 'voice'):
+            try:
+                note = inside(root, job.get('editorial_records', {}).get(key, ''))
+                if len(note.read_text(encoding='utf-8').strip()) < 40:
+                    errors.append(f'actual {key} review notes required')
+            except (OSError, ValueError) as exc:
+                errors.append(f'{key} review missing: {exc}')
     o = job.get('originality', {})
     if o.get('publish_decision') != 'publish':
         errors.append('hold/merge job cannot produce a standalone release HTML')
@@ -184,6 +200,8 @@ def content_checks(job: dict, root: Path) -> list[str]:
     blocks = job.get('blocks', [])
     figures = [b for b in blocks if b.get('type') == 'figure']
     visual_plan = job.get('visual_plan', {})
+    annotated = job.get('visual_policy') == VISUAL_POLICY
+    compact = visual_plan.get('collage_frame_policy') == FRAME_POLICY
     if visual_plan.get('planned_visible_units') != len(figures):
         errors.append('visual plan count differs from actual figures')
     if len(figures) not in (2, 3, 4) and not (len(figures) == 1 and job.get('single_frame_exception')):
@@ -191,12 +209,26 @@ def content_checks(job: dict, root: Path) -> list[str]:
     n_direct = sum(b.get('visual') == 'direct-video-frame' for b in figures)
     n_collage = sum(b.get('visual') == 'video-evidence-collage' for b in figures)
     exception = job.get('single_frame_exception', '')
-    if not (n_direct == 1 and n_collage == 2 and len(figures) == 3) and not visual_plan.get('structure_exception_reason'):
+    if annotated and (len(figures) != 2 or n_collage != 2):
+        errors.append('new visual policy requires exactly two annotated collages')
+    if not annotated and not (n_direct == 1 and n_collage == 2 and len(figures) == 3) and not visual_plan.get('structure_exception_reason'):
         errors.append('non-default visual structure requires reason')
-    if job.get('account') in ('dream', 'basketball') and not (n_direct and n_collage):
+    if not annotated and job.get('account') in ('dream', 'basketball') and not (n_direct and n_collage):
         if len(exception) < 12 or not any(b.get('visual') == 'single-frame-exception' for b in figures):
             errors.append('Dream/basketball need direct frame + collage or documented single-frame exception')
     previous_collage = False
+    all_frame_hashes = set()
+    collage_claims = set()
+    if annotated:
+        actual_manifests = [b.get('collage_manifest') for b in figures]
+        if set(actual_manifests) != set(job.get('collage_manifests', [])) or len(set(actual_manifests)) != 2:
+            errors.append('two distinct registered collage manifests required')
+        try:
+            note = inside(root, visual_plan.get('annotation_review', ''))
+            if len(note.read_text(encoding='utf-8').strip()) < 40:
+                errors.append('actual 375px visual review required')
+        except (OSError, ValueError) as exc:
+            errors.append(f'visual review missing: {exc}')
     for block in blocks:
         if block.get('type') != 'figure':
             if block.get('type') in ('paragraph', 'lead') and block.get('text', '').strip():
@@ -218,14 +250,39 @@ def content_checks(job: dict, root: Path) -> list[str]:
                 if manifest.get('kind') != 'video-evidence-collage':
                     errors.append('wrong collage kind')
                 rows = manifest.get('sources', [])
-                if not 4 <= len(rows) <= 6 or len(rows) != block.get('frame_count') or len(rows) != manifest.get('frame_count'):
-                    errors.append('collage frame counts must match and be 4-6')
+                lo, hi = (2, 4) if compact else (4, 6)
+                if not lo <= len(rows) <= hi or len(rows) != block.get('frame_count') or len(rows) != manifest.get('frame_count'):
+                    errors.append(f'collage frame counts must match and be {lo}-{hi}')
                 if len({r.get('sha256') for r in rows}) != len(rows):
                     errors.append('collage contains duplicate image hashes')
                 if manifest.get('source_sha256') != job.get('source', {}).get('sha256'):
                     errors.append('collage belongs to another video')
                 if manifest.get('output') != block['src'] or sha256(inside(root, block['src'])) != manifest.get('output_sha256'):
                     errors.append('collage asset and manifest mismatch')
+                if compact:
+                    from PIL import Image
+                    asset = inside(root, block['src'])
+                    with Image.open(asset) as image:
+                        if max(image.size) > 4096 or asset.stat().st_size > 3 * 1024 * 1024:
+                            errors.append('collage exceeds local 4096px/3MiB export budget')
+                if annotated:
+                    claim = str(manifest.get('claim', '')).strip()
+                    if not claim or claim in collage_claims:
+                        errors.append('each collage needs a distinct evidence claim')
+                    collage_claims.add(claim)
+                    hashes = {r.get('sha256') for r in rows}
+                    if hashes & all_frame_hashes:
+                        errors.append('duplicate source frames across the two collages')
+                    all_frame_hashes.update(hashes)
+                    annotations = manifest.get('public_annotations', {})
+                    if not annotations.get('title') or not annotations.get('items'):
+                        errors.append('actual in-image title and annotation records required')
+                    for item in annotations.get('items', []):
+                        if (not isinstance(item.get('source_index'), int)
+                            or not 1 <= item['source_index'] <= len(rows)
+                            or not all(item.get(k) for k in ('text', 'evidence_ref', 'placement'))
+                            or item.get('basis') not in ('frame', 'speaker', 'editorial', 'external')):
+                            errors.append('in-image annotation record incomplete')
                 for row in rows:
                     check_frame(job, root, row['path'], row['timestamp'])
                     if sha256(inside(root, row['path'])) != row.get('sha256') or not row.get('label'):
@@ -253,9 +310,19 @@ def final_checks(job: dict, root: Path) -> list[str]:
     build = job.get('build', {})
     try:
         if build.get('input_fingerprint') != fingerprint(job, root):
-            errors.append('inputs changed after render; render + preview again')
-        for field, name in (('html_sha256', job['output']), ('preview_sha256', job['preview']),
-                             ('ledger_sha256', job['evidence']['ledger_output'])):
+            errors.append('inputs changed after render; render + layout/visual check again')
+        artifacts = [('html_sha256', job['output']), ('ledger_sha256', job['evidence']['ledger_output'])]
+        if job.get('delivery_policy') == DELIVERY_POLICY:
+            artifacts.append(('layout_sha256', job['layout_report']))
+            report = read_json(inside(root, job['layout_report']))
+            if (report.get('html_sha256') != sha256(inside(root, job['output']))
+                or report.get('viewport_width') != 375 or report.get('passed') is not True
+                or report.get('broken_images') != 0 or report.get('horizontal_overflow') is not False
+                or not report.get('checked_at')):
+                errors.append('375px layout report missing, failed or stale')
+        else:
+            artifacts.append(('preview_sha256', job['preview']))
+        for field, name in artifacts:
             if build.get(field) != sha256(inside(root, name)):
                 errors.append(f'{field} missing or stale')
     except (ValueError, KeyError, OSError) as exc:

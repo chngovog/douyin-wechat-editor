@@ -1,5 +1,19 @@
 # 验证记录
 
+## 2026-10-12：1.1.0
+
+- Skill Creator quick_validate通过；git diff --check通过。
+- Windows/Python 3.12、中文字体、ffmpeg和真实独立Chromium环境，39项unittest全部通过，0跳过。
+- 新16项覆盖：新init、完整可见正文计数（标点/字母/数字/图注/来源/H1）、400/500边界、未做图片即可count、超字保留草稿报告并失败、三项交付、缺查重/审稿记录、缺图内说明、跨组重复原帧、第三图拒绝、4096px预算、过期HTML/排版记录、关闭QA开关不能跳检查。
+- 真正运行2/3/4帧中文拼图、圈选与局部放大；查看合成两帧成品，修正局部区域未放大的问题，再重新跑测试。测试素材不是真实视频证据，目视不代表真实文章内容通过。
+- 真正运行375px无截图检查及preview兼容入口，确认无手机PNG；坏图、横向溢出都会返回失败JSON。旧23项继续覆盖来源绑定、封面限制、输入指纹、旧预览与完整验收。
+- 未执行抖音实网选题、ASR、ImageGen生图或微信后台粘贴/发表；未证明平台字数算法、可粘贴性、低创作审核或推荐效果。
+- 本次仅更新分享仓库，不修改作者正在运行的文章、历史文件、模型或自动任务。
+
+完整复现：安装README依赖，设置ARTICLE_FONT、BROWSER_EXE（或使用Playwright自带浏览器）、RUN_BROWSER_TEST=1、RUN_FFMPEG_TEST=1，然后运行 `python -m unittest discover -s tests -v`。默认没有环境开关时会SKIP外部依赖用例，请以实际PASS/SKIP为准。所有夹具在临时目录生成；TEST_ARTIFACT_DIR可选择另存合成图片供目视，禁止把它们当正式文章。
+
+## 历史版本1.0.0
+
 2026-09-16，本地Windows环境完成：
 
 - Skill Creator的quick_validate通过，技能名称/frontmatter/占位检查正常。
